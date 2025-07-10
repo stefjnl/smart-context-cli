@@ -4,8 +4,57 @@ import os
 import sys
 import requests
 import hashlib
+import shutil
+import time
+import threading
 from pathlib import Path
 from datetime import datetime
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+class CodeFileHandler(FileSystemEventHandler):
+    """Handle file system events for code files"""
+    
+    def __init__(self, ai_assistant):
+        self.ai = ai_assistant
+        self.last_update = time.time()
+        
+    def on_modified(self, event):
+        if event.is_directory:
+            return
+            
+        filepath = Path(event.src_path)
+        
+        # Only process code files
+        if filepath.suffix.lower() in self.ai.code_extensions:
+            # Debounce rapid changes (wait 1 second)
+            current_time = time.time()
+            if current_time - self.last_update < 1:
+                return
+                
+            self.last_update = current_time
+            
+            # Update index for this file
+            print(f"File changed: {filepath.name} - updating index...")
+            self.ai.update_single_file(filepath)
+    
+    def on_created(self, event):
+        if event.is_directory:
+            return
+            
+        filepath = Path(event.src_path)
+        if filepath.suffix.lower() in self.ai.code_extensions:
+            print(f"New file created: {filepath.name} - updating index...")
+            self.ai.update_single_file(filepath)
+    
+    def on_deleted(self, event):
+        if event.is_directory:
+            return
+            
+        filepath = Path(event.src_path)
+        if filepath.suffix.lower() in self.ai.code_extensions:
+            print(f"File deleted: {filepath.name} - updating index...")
+            self.ai.remove_from_index(filepath)
 
 class AIAssistant:
     def __init__(self):
@@ -20,6 +69,9 @@ class AIAssistant:
         
         # Supported file types
         self.code_extensions = {'.py', '.js', '.jsx', '.ts', '.tsx', '.html', '.css', '.json', '.md', '.sql', '.yaml', '.yml', '.dockerfile', '.txt'}
+        
+        # Auto-check for file changes on each query
+        self.check_for_changes()
         
     def get_file_hash(self, filepath):
         """Get MD5 hash of file content"""
@@ -173,6 +225,128 @@ class AIAssistant:
         with open(self.history_file, 'w') as f:
             json.dump(history, f, indent=2)
     
+    def update_single_file(self, filepath):
+        """Update index for a single file"""
+        try:
+            # Load existing index
+            index = {}
+            if self.index_file.exists():
+                with open(self.index_file, 'r') as f:
+                    index = json.load(f)
+            
+            # Load existing hashes
+            hashes = {}
+            if self.hashes_file.exists():
+                with open(self.hashes_file, 'r') as f:
+                    hashes = json.load(f)
+            
+            rel_path = str(filepath.relative_to('.'))
+            
+            if filepath.exists():
+                # Update file info
+                file_hash = self.get_file_hash(filepath)
+                if file_hash:
+                    hashes[rel_path] = file_hash
+                    
+                    # Read and index file
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    lines = content.split('\n')
+                    index[rel_path] = {
+                        'size': len(content),
+                        'lines': len(lines),
+                        'extension': filepath.suffix,
+                        'imports': self.extract_imports(content, filepath.suffix),
+                        'functions': self.extract_functions(content, filepath.suffix),
+                        'last_modified': datetime.fromtimestamp(filepath.stat().st_mtime).isoformat(),
+                        'preview': '\n'.join(lines[:5])
+                    }
+            else:
+                # File was deleted
+                if rel_path in index:
+                    del index[rel_path]
+                if rel_path in hashes:
+                    del hashes[rel_path]
+            
+            # Save updated index and hashes
+            with open(self.index_file, 'w') as f:
+                json.dump(index, f, indent=2)
+            with open(self.hashes_file, 'w') as f:
+                json.dump(hashes, f, indent=2)
+                
+        except Exception as e:
+            print(f"Error updating file index: {e}")
+    
+    def remove_from_index(self, filepath):
+        """Remove file from index"""
+        try:
+            rel_path = str(filepath.relative_to('.'))
+            
+            # Load and update index
+            if self.index_file.exists():
+                with open(self.index_file, 'r') as f:
+                    index = json.load(f)
+                if rel_path in index:
+                    del index[rel_path]
+                with open(self.index_file, 'w') as f:
+                    json.dump(index, f, indent=2)
+            
+            # Load and update hashes
+            if self.hashes_file.exists():
+                with open(self.hashes_file, 'r') as f:
+                    hashes = json.load(f)
+                if rel_path in hashes:
+                    del hashes[rel_path]
+                with open(self.hashes_file, 'w') as f:
+                    json.dump(hashes, f, indent=2)
+                    
+        except Exception as e:
+            print(f"Error removing from index: {e}")
+    
+    def check_for_changes(self):
+        """Quick check if any files have changed since last run"""
+        if not self.hashes_file.exists():
+            return  # No previous state to compare
+            
+        try:
+            with open(self.hashes_file, 'r') as f:
+                old_hashes = json.load(f)
+        except:
+            return
+            
+        changes_found = False
+        
+        # Check existing files for changes
+        for root, dirs, files in os.walk('.'):
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ['node_modules', '__pycache__', 'venv', 'env']]
+            
+            for file in files:
+                filepath = Path(root) / file
+                if filepath.suffix.lower() in self.code_extensions:
+                    rel_path = str(filepath.relative_to('.'))
+                    current_hash = self.get_file_hash(filepath)
+                    
+                    if rel_path not in old_hashes or old_hashes[rel_path] != current_hash:
+                        changes_found = True
+                        break
+            
+            if changes_found:
+                break
+        
+        # Check for deleted files
+        if not changes_found:
+            for old_file in old_hashes:
+                if not Path(old_file).exists():
+                    changes_found = True
+                    break
+        
+        if changes_found:
+            print("📝 Files changed - updating index...")
+            self.scan_codebase()
+        else:
+            print("✅ Files up to date")
+    
     def write_file(self, filepath, content, backup=True):
         """Write content to file with optional backup"""
         if backup and Path(filepath).exists():
@@ -194,30 +368,14 @@ class AIAssistant:
         """Extract code blocks from LLM response"""
         import re
         
-        # Find code blocks (```python ... ``` or ``` ... ```)
-        code_blocks = re.findall(r'```(?:python)?\n(.*?)\n```', response_text, re.DOTALL)
+        # Find code blocks with ```python or just ```
+        code_blocks = re.findall(r'```(?:python)?\s*\n(.*?)```', response_text, re.DOTALL)
         
         if code_blocks:
+            # Return the first (usually most complete) code block
             return code_blocks[0].strip()
         
-        # If no code blocks, look for code-like content
-        lines = response_text.split('\n')
-        code_lines = []
-        in_code = False
-        
-        for line in lines:
-            # Simple heuristics for code detection
-            if any(keyword in line for keyword in ['def ', 'class ', 'import ', 'from ', '@app.', 'if __name__']):
-                in_code = True
-            
-            if in_code:
-                code_lines.append(line)
-                
-            # Stop at explanatory text
-            if in_code and line.strip() and not line.startswith((' ', '\t')) and not any(c in line for c in ['def', 'class', 'import', '@', 'if', 'for', 'while', 'try', 'except']):
-                break
-                
-        return '\n'.join(code_lines).strip() if code_lines else None
+        return None
         
         # Detailed questions get full context (but limited)
         context = "=== PROJECT CONTEXT ===\n"
@@ -347,9 +505,10 @@ Please provide a helpful response based on the project context above. For code r
 if __name__ == "__main__":
     ai = AIAssistant()
     if len(sys.argv) > 1:
-        if sys.argv[1] == "setup":
+        command = sys.argv[1]
+        if command == "setup":
             ai.setup()
-        elif sys.argv[1] == "write":
+        elif command == "write":
             if len(sys.argv) < 4:
                 print("Usage: python3 ai_assistant.py write 'question' filename")
                 print("Example: python3 ai_assistant.py write 'Create a delete user endpoint' main.py")
@@ -358,6 +517,7 @@ if __name__ == "__main__":
                 filename = sys.argv[3]
                 ai.query(question, write_to_file=filename)
         else:
+            # Regular query
             ai.query(" ".join(sys.argv[1:]))
     else:
         print("Usage: python3 ai_assistant.py 'your question'")
