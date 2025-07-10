@@ -172,6 +172,52 @@ class AIAssistant:
         
         with open(self.history_file, 'w') as f:
             json.dump(history, f, indent=2)
+    
+    def write_file(self, filepath, content, backup=True):
+        """Write content to file with optional backup"""
+        if backup and Path(filepath).exists():
+            # Create backup
+            backup_path = f"{filepath}.backup"
+            import shutil
+            shutil.copy2(filepath, backup_path)
+            print(f"Created backup: {backup_path}")
+        
+        # Write new content
+        with open(filepath, 'w') as f:
+            f.write(content)
+        print(f"Updated: {filepath}")
+        
+        # Update index
+        self.scan_codebase()
+        
+    def extract_code_from_response(self, response_text):
+        """Extract code blocks from LLM response"""
+        import re
+        
+        # Find code blocks (```python ... ``` or ``` ... ```)
+        code_blocks = re.findall(r'```(?:python)?\n(.*?)\n```', response_text, re.DOTALL)
+        
+        if code_blocks:
+            return code_blocks[0].strip()
+        
+        # If no code blocks, look for code-like content
+        lines = response_text.split('\n')
+        code_lines = []
+        in_code = False
+        
+        for line in lines:
+            # Simple heuristics for code detection
+            if any(keyword in line for keyword in ['def ', 'class ', 'import ', 'from ', '@app.', 'if __name__']):
+                in_code = True
+            
+            if in_code:
+                code_lines.append(line)
+                
+            # Stop at explanatory text
+            if in_code and line.strip() and not line.startswith((' ', '\t')) and not any(c in line for c in ['def', 'class', 'import', '@', 'if', 'for', 'while', 'try', 'except']):
+                break
+                
+        return '\n'.join(code_lines).strip() if code_lines else None
         
         # Detailed questions get full context (but limited)
         context = "=== PROJECT CONTEXT ===\n"
@@ -190,7 +236,7 @@ class AIAssistant:
         
         return context
         
-    def query(self, question):
+    def query(self, question, write_to_file=None):
         """Send question to CodeLlama with context"""
         print(f"Asking: {question}")
         
@@ -207,12 +253,17 @@ class AIAssistant:
             for entry in history:
                 conversation_context += f"{entry['type'].upper()}: {entry['content'][:100]}...\n"
         
+        # Enhanced prompt for file writing
+        file_instruction = ""
+        if write_to_file:
+            file_instruction = f"\n\nIMPORTANT: Provide complete, working code for {write_to_file}. Include all necessary imports and ensure the code is production-ready."
+        
         # Build prompt
         prompt = f"""You are a coding assistant with full knowledge of this FastAPI project.
 
 {context}{conversation_context}
 
-Question: {question}
+Question: {question}{file_instruction}
 
 Please provide a helpful response based on the project context above. For code requests, show complete, working code."""
         
@@ -244,13 +295,25 @@ Please provide a helpful response based on the project context above. For code r
                 
                 # Save conversation
                 self.save_conversation(question, full_response)
+                
+                # Auto-write to file if requested
+                if write_to_file:
+                    code = self.extract_code_from_response(full_response)
+                    if code:
+                        confirm = input(f"\nWrite this code to {write_to_file}? (y/n): ")
+                        if confirm.lower() == 'y':
+                            self.write_file(write_to_file, code)
+                        else:
+                            print("Code not written to file.")
+                    else:
+                        print("No code block found in response.")
             else:
                 print(f"Error: {response.status_code}")
                 
         except Exception as e:
-            print(f"Connection error: {e}")
-            print("\nTrying with CodeLlama as fallback...")
-            # Fallback to original model
+            print(f"Streaming error: {e}")
+            print("Retrying without streaming...")
+            # Fallback to non-streaming
             try:
                 response = requests.post(self.ollama_url, json={
                     "model": "codellama:7b-instruct-q4_0",
@@ -259,17 +322,44 @@ Please provide a helpful response based on the project context above. For code r
                 })
                 if response.status_code == 200:
                     result = response.json()
-                    print(result['response'])
+                    full_response = result['response']
+                    print("\n" + "="*50)
+                    print(full_response)
+                    print("="*50)
+                    
+                    # Save conversation
+                    self.save_conversation(question, full_response)
+                    
+                    # Auto-write to file if requested
+                    if write_to_file:
+                        code = self.extract_code_from_response(full_response)
+                        if code:
+                            confirm = input(f"\nWrite this code to {write_to_file}? (y/n): ")
+                            if confirm.lower() == 'y':
+                                self.write_file(write_to_file, code)
+                            else:
+                                print("Code not written to file.")
+                        else:
+                            print("No code block found in response.")
             except:
-                print("All models failed to respond")
+                print("Connection failed completely")
 
 if __name__ == "__main__":
     ai = AIAssistant()
     if len(sys.argv) > 1:
         if sys.argv[1] == "setup":
             ai.setup()
+        elif sys.argv[1] == "write":
+            if len(sys.argv) < 4:
+                print("Usage: python3 ai_assistant.py write 'question' filename")
+                print("Example: python3 ai_assistant.py write 'Create a delete user endpoint' main.py")
+            else:
+                question = sys.argv[2]
+                filename = sys.argv[3]
+                ai.query(question, write_to_file=filename)
         else:
             ai.query(" ".join(sys.argv[1:]))
     else:
         print("Usage: python3 ai_assistant.py 'your question'")
         print("       python3 ai_assistant.py setup")
+        print("       python3 ai_assistant.py write 'question' filename")
