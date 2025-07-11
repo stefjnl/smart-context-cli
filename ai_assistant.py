@@ -307,12 +307,16 @@ class AIAssistant:
     def check_for_changes(self):
         """Quick check if any files have changed since last run"""
         if not self.hashes_file.exists():
-            return  # No previous state to compare
+            print("🔧 No index found - creating initial index...")
+            self.scan_codebase()
+            return
             
         try:
             with open(self.hashes_file, 'r') as f:
                 old_hashes = json.load(f)
         except:
+            print("🔧 Invalid index - recreating...")
+            self.scan_codebase()
             return
             
         changes_found = False
