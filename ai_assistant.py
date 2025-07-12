@@ -483,6 +483,13 @@ IMPORTANT: When providing code solutions:
 3. Provide complete, executable code - not step-by-step instructions
 4. Include all necessary imports at the top of code blocks
 
+CRITICAL REQUIREMENTS:
+1. Generate only valid, syntactically correct Python code
+2. Include all necessary imports at the top
+3. Use proper patterns and dependency injection
+4. Test your code mentally before responding
+5. No placeholder syntax like "database-dependent-bcrypt"
+
 Example response format:
 ```python
 # Your complete Python code here
@@ -494,11 +501,11 @@ def your_function():
 
 Question: {question}{file_instruction}"""
         
-        # Send to Ollama with streaming
+        # Send to LLM with streaming
         try:
             print("\n" + "="*50)
             response = requests.post(self.ollama_url, json={
-                "model": "codellama:7b-instruct-q4_0",
+                "model": "deepseek-r1:7b",  # Changed from "codellama:7b-instruct-q4_0"
                 "prompt": prompt,
                 "stream": True,
                 "options": {
@@ -558,7 +565,7 @@ Question: {question}{file_instruction}"""
             # Fallback to non-streaming
             try:
                 response = requests.post(self.ollama_url, json={
-                    "model": "codellama:7b-instruct-q4_0",
+                    "model": "deepseek-r1:7b",  # Changed from "codellama:7b-instruct-q4_0"
                     "prompt": prompt,
                     "stream": False,
                     "options": {
