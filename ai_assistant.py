@@ -81,6 +81,54 @@ class AIAssistant:
         except:
             return None
     
+    def suggest_filename(self, question, code):
+        """Suggest appropriate filename based on question and code content"""
+        question_lower = question.lower()
+        
+        # React/JS components
+        if 'react' in question_lower or 'component' in question_lower:
+            if 'user' in question_lower:
+                return 'UserComponent.jsx'
+            elif 'login' in question_lower:
+                return 'LoginComponent.jsx'
+            else:
+                return 'Component.jsx'
+        
+        # Python files
+        if 'fastapi' in question_lower or 'endpoint' in question_lower or 'route' in question_lower:
+            if 'user' in question_lower:
+                return 'users.py'
+            elif 'auth' in question_lower:
+                return 'auth.py'
+            else:
+                return 'routes.py'
+        
+        # Models
+        if 'model' in question_lower:
+            return 'models.py'
+        
+        # Database
+        if 'database' in question_lower:
+            return 'database.py'
+        
+        # CSS
+        if 'css' in question_lower or 'style' in question_lower:
+            return 'styles.css'
+        
+        # HTML
+        if 'html' in question_lower:
+            return 'index.html'
+        
+        # Default based on code content
+        if 'import React' in code or 'jsx' in code.lower():
+            return 'Component.jsx'
+        elif 'from fastapi' in code or '@app.' in code:
+            return 'main.py'
+        elif 'def ' in code and 'class ' in code:
+            return 'module.py'
+        
+        return None  # Let user specify
+    
     def scan_codebase(self):
         """Scan project files and build index"""
         print("Scanning codebase...")
@@ -203,6 +251,23 @@ class AIAssistant:
             context = f"=== PROJECT SUMMARY ===\nFiles: {', '.join(index.keys())}\n"
             return context
         
+        # Detailed questions get full context (but limited)
+        context = "=== PROJECT CONTEXT ===\n"
+        context += f"Files in project: {len(index)}\n\n"
+        
+        # Limit to 3 most relevant files to keep prompt small
+        file_count = 0
+        for filepath, info in list(index.items())[:3]:
+            context += f"File: {filepath} ({info['lines']} lines)\n"
+            if info['functions']:
+                context += f"  Functions: {', '.join(info['functions'][:2])}\n"
+            file_count += 1
+        
+        if len(index) > 3:
+            context += f"... and {len(index) - 3} more files\n"
+        
+        return context
+    
     def load_conversation_history(self):
         """Load recent conversation history"""
         if not self.history_file.exists():
@@ -373,30 +438,13 @@ class AIAssistant:
         import re
         
         # Find code blocks with ```python or just ```
-        code_blocks = re.findall(r'```(?:python)?\s*\n(.*?)```', response_text, re.DOTALL)
+        code_blocks = re.findall(r'```(?:python|javascript|jsx)?\s*\n(.*?)```', response_text, re.DOTALL)
         
         if code_blocks:
             # Return the first (usually most complete) code block
             return code_blocks[0].strip()
         
         return None
-        
-        # Detailed questions get full context (but limited)
-        context = "=== PROJECT CONTEXT ===\n"
-        context += f"Files in project: {len(index)}\n\n"
-        
-        # Limit to 3 most relevant files to keep prompt small
-        file_count = 0
-        for filepath, info in list(index.items())[:3]:
-            context += f"File: {filepath} ({info['lines']} lines)\n"
-            if info['functions']:
-                context += f"  Functions: {', '.join(info['functions'][:2])}\n"
-            file_count += 1
-        
-        if len(index) > 3:
-            context += f"... and {len(index) - 3} more files\n"
-        
-        return context
         
     def query(self, question, write_to_file=None):
         """Send question to CodeLlama with context"""
@@ -417,29 +465,46 @@ class AIAssistant:
         
         # Enhanced prompt for file writing
         file_instruction = ""
+        question_lower = question.lower()
+        
         if write_to_file:
             file_instruction = f"\n\nIMPORTANT: Provide complete, working code for {write_to_file}. Include all necessary imports and ensure the code is production-ready."
+        elif any(word in question_lower for word in ['create', 'write', 'generate', 'build']):
+            file_instruction = f"\n\nSUGGESTION: If you provide code, offer to write it to a file for the user."
         
-        # Build prompt
+        # Enhanced prompt with explicit code formatting instructions
         prompt = f"""You are a coding assistant with full knowledge of this FastAPI project.
 
 {context}{conversation_context}
 
-Question: {question}{file_instruction}
+IMPORTANT: When providing code solutions:
+1. Always wrap code in proper markdown code blocks with language specification
+2. Use ```python for Python code, ```javascript for JS, ```jsx for React
+3. Provide complete, executable code - not step-by-step instructions
+4. Include all necessary imports at the top of code blocks
 
-Please provide a helpful response based on the project context above. For code requests, show complete, working code."""
+Example response format:
+```python
+# Your complete Python code here
+import necessary_modules
+
+def your_function():
+    return "working code"
+```
+
+Question: {question}{file_instruction}"""
         
         # Send to Ollama with streaming
         try:
             print("\n" + "="*50)
             response = requests.post(self.ollama_url, json={
-                "model": "codellama:7b-instruct-q4_0",  # Back to CodeLlama
+                "model": "codellama:7b-instruct-q4_0",
                 "prompt": prompt,
-                "stream": True,  # Enable streaming
+                "stream": True,
                 "options": {
                     "temperature": 0.1,
                     "top_p": 0.9,
-                    "num_predict": 200
+                    "num_predict": 2000
                 }
             }, stream=True)
             
@@ -457,6 +522,21 @@ Please provide a helpful response based on the project context above. For code r
                 
                 # Save conversation
                 self.save_conversation(question, full_response)
+                
+                # Auto-detect code and offer to write file
+                if not write_to_file and any(word in question.lower() for word in ['create', 'write', 'generate', 'build']):
+                    code = self.extract_code_from_response(full_response)
+                    if code:
+                        # Suggest filename based on question
+                        suggested_file = self.suggest_filename(question, code)
+                        if suggested_file:
+                            confirm = input(f"\nWould you like me to write this code to {suggested_file}? (y/n): ")
+                            if confirm.lower() == 'y':
+                                self.write_file(suggested_file, code)
+                        else:
+                            filename = input("\nEnter filename to save this code (or press Enter to skip): ")
+                            if filename.strip():
+                                self.write_file(filename, code)
                 
                 # Auto-write to file if requested
                 if write_to_file:
@@ -480,7 +560,10 @@ Please provide a helpful response based on the project context above. For code r
                 response = requests.post(self.ollama_url, json={
                     "model": "codellama:7b-instruct-q4_0",
                     "prompt": prompt,
-                    "stream": False
+                    "stream": False,
+                    "options": {
+                        "num_predict": 2000
+                    }
                 })
                 if response.status_code == 200:
                     result = response.json()
@@ -503,8 +586,10 @@ Please provide a helpful response based on the project context above. For code r
                                 print("Code not written to file.")
                         else:
                             print("No code block found in response.")
-            except:
-                print("Connection failed completely")
+                else:
+                    print(f"Error: {response.status_code} - {response.text}")
+            except Exception as fallback_error:
+                print(f"Complete connection failure: {fallback_error}")
 
 if __name__ == "__main__":
     ai = AIAssistant()
