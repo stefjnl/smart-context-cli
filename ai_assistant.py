@@ -505,7 +505,7 @@ Question: {question}{file_instruction}"""
         try:
             print("\n" + "="*50)
             response = requests.post(self.ollama_url, json={
-                "model": "deepseek-r1:7b",  # Changed from "codellama:7b-instruct-q4_0"
+                "model": "deepseek-coder:6.7b-instruct", # "deepseek-r1:7b",  # "codellama:7b-instruct-q4_0"
                 "prompt": prompt,
                 "stream": True,
                 "options": {
@@ -565,7 +565,7 @@ Question: {question}{file_instruction}"""
             # Fallback to non-streaming
             try:
                 response = requests.post(self.ollama_url, json={
-                    "model": "deepseek-r1:7b",  # Changed from "codellama:7b-instruct-q4_0"
+                    "model": "deepseek-coder:6.7b-instruct", #  "deepseek-r1:7b",  # Changed from "codellama:7b-instruct-q4_0"
                     "prompt": prompt,
                     "stream": False,
                     "options": {
